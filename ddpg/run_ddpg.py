@@ -1,7 +1,7 @@
 import gym
 import numpy as np
 
-from dqn import DQN
+from ddpg import DDPG
 from absl import flags, app
 
 FLAGS = flags.FLAGS
@@ -11,7 +11,7 @@ flags.DEFINE_integer('num_episodes', 1, 'Number of episodes to run the trained a
 def main(argv):
     env_name = FLAGS.env_name
     env = gym.make(env_name)
-    agent = DQN(env, load_path=f'train/{env_name}/')
+    agent = DDPG(env, load_path=f'train/{env_name}/')
 
     for episodes in range(FLAGS.num_episodes):
         done = False
@@ -19,7 +19,7 @@ def main(argv):
         episode_reward = 0
         while not done:
             env.render()
-            action = agent.act(np.expand_dims(obs, axis=0))
+            action = agent.act(obs, noise=False)
             obs, rew, done, info = env.step(action)
             episode_reward += rew
         print(f'Episode Reward:{episode_reward}')

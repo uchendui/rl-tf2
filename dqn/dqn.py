@@ -1,11 +1,10 @@
-import sys
 import gym
 import numpy as np
 import tensorflow as tf
-from util.replay_buffer import ReplayBuffer
-from tensorflow.keras import layers, Model
 
 from absl import flags, app
+from util.replay_buffer import ReplayBuffer
+from tensorflow.keras import layers, Model
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'CartPole-v0', 'Environment name')
@@ -77,7 +76,7 @@ class DQN:
                  max_eps=1.0,
                  min_eps=0.1,
                  render=False,
-                 print_freq=20,
+                 print_freq=1,
                  load_path=None,
                  save_path=None,
                  batch_size=32,
@@ -225,7 +224,7 @@ class DQN:
                     rand_actions = 0
 
 
-def main():
+def main(argv):
     env = gym.make(FLAGS.env_name)
     dqn = DQN(
         env=env,
@@ -249,6 +248,4 @@ def main():
 
 
 if __name__ == '__main__':
-    FLAGS(sys.argv)
-    main()
-    # app.run(main())
+    app.run(main)
