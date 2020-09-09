@@ -1,7 +1,6 @@
 import gym
-import numpy as np
 
-from ddpg import DDPG
+from ddpg import DDPG  # Note that flags from ddpg.py are imported
 from absl import flags, app
 
 FLAGS = flags.FLAGS
@@ -11,7 +10,7 @@ flags.DEFINE_integer('num_episodes', 1, 'Number of episodes to run the trained a
 def main(argv):
     env_name = FLAGS.env_name
     env = gym.make(env_name)
-    agent = DDPG(env, load_path=f'train/{env_name}/')
+    agent = DDPG(env, load_path=f'train/{env_name}', training=False)
 
     for episodes in range(FLAGS.num_episodes):
         done = False
@@ -19,10 +18,12 @@ def main(argv):
         episode_reward = 0
         while not done:
             env.render()
-            action = agent.act(obs, noise=False)
+            action = agent.act(obs, noise=True)
             obs, rew, done, info = env.step(action)
+            obs = obs.flatten()
             episode_reward += rew
         print(f'Episode Reward:{episode_reward}')
+    env.close()
 
 
 if __name__ == '__main__':
