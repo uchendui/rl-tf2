@@ -181,7 +181,7 @@ class DDPG:
         norm_dist = tf.random.normal(self.env.action_space.shape, stddev=self.act_noise)
 
         action = self.actor(np.expand_dims(obs, axis=0))
-        action = np.clip(action.numpy() + norm_dist.numpy() if noise else 0,
+        action = np.clip(action.numpy() + (norm_dist.numpy() if noise else 0),
                          a_min=self.env.action_space.low,
                          a_max=self.env.action_space.high)
         return action
@@ -211,9 +211,6 @@ class DDPG:
 
                     self.actor.save_weights(f'{self.save_path}/actor')
                     self.critic.save_weights(f'{self.save_path}/critic')
-
-                    if new_mean_reward >= -200:
-                        self.render = True
 
             # Receive initial observation state s_1
             obs = self.env.reset()

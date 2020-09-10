@@ -4,7 +4,7 @@ from ddpg import DDPG  # Note that flags from ddpg.py are imported
 from absl import flags, app
 
 FLAGS = flags.FLAGS
-flags.DEFINE_integer('num_episodes', 1, 'Number of episodes to run the trained agent')
+flags.DEFINE_integer('num_episodes', 10, 'Number of episodes to run the trained agent')
 
 
 def main(argv):
@@ -18,7 +18,7 @@ def main(argv):
         episode_reward = 0
         while not done:
             env.render()
-            action = agent.act(obs, noise=True)
+            action = agent.act(obs, noise=False)
             obs, rew, done, info = env.step(action)
             obs = obs.flatten()
             episode_reward += rew
