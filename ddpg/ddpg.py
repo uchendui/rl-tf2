@@ -38,12 +38,12 @@ class Actor(Model):
     def __init__(self, action_dim, action_range, **kwargs):
         super(Actor, self).__init__(kwargs)
         # Model architecture from https://keras.io/examples/rl/ddpg_pendulum/
-        last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
+        # last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
         self.a1 = layers.Dense(512, activation='relu', name='actor_1')
         self.a2 = layers.Dense(512, activation='relu', name='actor_2')
         self.action_prediction = layers.Dense(action_dim,
                                               activation='tanh',
-                                              kernel_initializer=last_init,
+                                              # kernel_initializer=last_init,
                                               name='actor_action_pred')
         self.action_range = action_range
 
@@ -102,7 +102,6 @@ class DDPG:
                  log_dir='logs/train',
                  training=True,
                  ):
-        self.first_update = False
         self.gamma = gamma
         self.polyak = polyak
         self.act_noise = act_noise
@@ -163,7 +162,7 @@ class DDPG:
             dones = dones.reshape(-1, 1)
             rewards = rewards.reshape(-1, 1)
 
-            # Set the target for learning and initialize layers for target network if not already
+            # Set the target for learning
             target_action_preds = self.target_actor(next_states)
             target_q_values = self.target_critic([next_states, target_action_preds])
             targets = rewards + self.gamma * target_q_values * (1 - dones)

@@ -29,13 +29,16 @@ class Buffer:
 
 
 class ReplayBuffer(Buffer):
-    def __init__(self, capacity):
+    def __init__(self, capacity, tuple_length=5):
         """Represents a replay buffer that stores transitions. (prev_state, action, reward, next_state)
 
         Args:
             capacity: Number of samples the replay buffer can hold.
+            tuple_length: Length of transition tuples. In some cases, we will need to
+                store more than just (s, a, r, s', d)
         """
         super().__init__(capacity=capacity)
+        self.tuple_length = tuple_length
         self.buffer = deque()
 
     def sample(self, n):
@@ -57,7 +60,9 @@ class ReplayBuffer(Buffer):
         Args:
             transition:  array containing transition (obs, action, reward, new_obs, done)
         """
-        assert (len(transition) == 5), "Transitions passed to replay buffer must be of length 5"
+        assert (len(
+            transition) == self.tuple_length), (f'Transitions passed to replay buffer '
+                                                f'must be of length {self.tuple_length}')
         if len(self.buffer) >= self.capacity:
             self.buffer.pop()
         self.buffer.appendleft(transition)
