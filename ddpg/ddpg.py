@@ -4,6 +4,7 @@ import tensorflow as tf
 
 from absl import flags, app
 from util import ReplayBuffer
+from util.tf import polyak_average
 from tensorflow.keras import layers, Model
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
@@ -28,46 +29,74 @@ flags.DEFINE_boolean('render', False, 'Render the environment during training')
 flags.DEFINE_integer('seed', 1234, 'Random seed for reproducible results')
 
 
-@tf.function
-def polyak_average(vars1, vars2, polyak):
-    for a, b in zip(vars1, vars2):
-        tf.compat.v1.assign(b, polyak * b + (1 - polyak) * a)
-
-
 class Actor(Model):
     def __init__(self, action_dim, action_range, **kwargs):
+        """
+        Model for the actor in DDPG.
+        Args:
+            action_dim (int): Number of dimensions in the actor vector
+            action_range (np.array): Sequence of ranges for each dimension in the action vector
+            **kwargs (dict): arbitrary keyword arguments
+        """
         super(Actor, self).__init__(kwargs)
         # Model architecture from https://keras.io/examples/rl/ddpg_pendulum/
-        last_init = tf.random_uniform_initializer(minval=-0.003, maxval=0.003)
-        self.a1 = layers.Dense(512, activation='relu', name='actor_1')
-        self.a2 = layers.Dense(512, activation='relu', name='actor_2')
+        self.layer_1 = layers.Dense(512, activation='relu', name='actor_1')
+        self.layer_2 = layers.Dense(512, activation='relu', name='actor_2')
         self.action_prediction = layers.Dense(action_dim,
                                               activation='tanh',
-                                              kernel_initializer=last_init,
                                               name='actor_action_pred')
+        self.batch_norm_1 = layers.BatchNormalization()
+        self.batch_norm_2 = layers.BatchNormalization()
         self.action_range = action_range
 
     def call(self, states, **kwargs):
-        out = self.a1(states)
-        out = layers.BatchNormalization()(out)
-        out = self.a2(out)
-        out = layers.BatchNormalization()(out)
+        """
+        Runs a forward pass of the model.
+        Args:
+            states: State vectors
+            **kwargs (dict): arbitrary keyword arguments
+
+        Returns:
+            Action predictions
+        """
+        out = self.layer_1(states)
+        out = self.batch_norm_1(out)
+        out = self.layer_2(out)
+        out = self.batch_norm_2(out)
         return self.action_range * self.action_prediction(out)
 
 
 class Critic(Model):
     def __init__(self, **kwargs):
+        """
+        Model for the critic (Q function) in DDPG
+        Args:
+            **kwargs (dict): arbitrary keyword arguments.
+        """
         super(Critic, self).__init__(kwargs)
         self.q1 = layers.Dense(512, activation='relu', name='critic_1')
         self.q2 = layers.Dense(512, activation='relu', name='critic_2')
         self.q_pred = layers.Dense(1, name='critic_q_pred')
+        self.concat = layers.Concatenate()
+        self.batch_norm_1 = layers.BatchNormalization()
+        self.batch_norm_2 = layers.BatchNormalization()
 
     def call(self, inputs, **kwargs):
-        out = layers.Concatenate()(inputs)
+        """
+        Runs a forward pass of the model.
+        Args:
+            inputs (list): A list of two elements with structure [states, actions] for estimating the Q-value
+            **kwargs (dict): arbitrary keyword arguments
+
+        Returns:
+            Q-value prediction
+        """
+        # https://www.tensorflow.org/api_docs/python/tf/keras/layers/BatchNormalization
+        out = self.concat(inputs)
         out = self.q1(out)
-        out = layers.BatchNormalization()(out)
+        out = self.batch_norm_1(out)
         out = self.q2(out)
-        out = layers.BatchNormalization()(out)
+        out = self.batch_norm_2(out)
         q_pred = self.q_pred(out)
         return q_pred
 
@@ -102,7 +131,6 @@ class DDPG:
                  log_dir='logs/train',
                  training=True,
                  ):
-        self.first_update = False
         self.gamma = gamma
         self.polyak = polyak
         self.act_noise = act_noise
@@ -130,12 +158,13 @@ class DDPG:
             self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.p_lr)
             self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
             self.summary_writer = tf.summary.create_file_writer(log_dir)
+            self.mse = tf.keras.losses.MeanSquaredError()
         if load_path is not None:
             self.actor.load_weights(f'{load_path}/actor')
             self.critic.load_weights(f'{load_path}/critic')
 
+    @tf.function
     def train_step(self, states, actions, targets):
-        # Update Actor
         with tf.GradientTape() as tape:
             action_predictions = self.actor(states)
             q_values = self.critic([states, action_predictions])
@@ -143,17 +172,15 @@ class DDPG:
         actor_gradients = tape.gradient(policy_loss, self.actor.trainable_variables)
         self.actor_optimizer.apply_gradients(zip(actor_gradients, self.actor.trainable_variables))
 
-        # Update Critic
         with tf.GradientTape() as tape:
             q_values = self.critic([states, actions])
-            mse_loss = tf.keras.losses.MeanSquaredError()(q_values, targets)
+            mse_loss = self.mse(q_values, targets)
         critic_gradients = tape.gradient(mse_loss, self.critic.trainable_variables)
         self.critic_optimizer.apply_gradients(zip(critic_gradients, self.critic.trainable_variables))
 
-        # Log training information
         with self.summary_writer.as_default():
-            tf.summary.scalar('MSE Loss', mse_loss, step=self.critic_optimizer.iterations)
             tf.summary.scalar('Policy Loss', policy_loss, step=self.critic_optimizer.iterations)
+            tf.summary.scalar('MSE Loss', mse_loss, step=self.critic_optimizer.iterations)
             tf.summary.scalar('Estimated Q Value', tf.reduce_mean(q_values), step=self.critic_optimizer.iterations)
 
     def update(self):
@@ -163,7 +190,7 @@ class DDPG:
             dones = dones.reshape(-1, 1)
             rewards = rewards.reshape(-1, 1)
 
-            # Set the target for learning and initialize layers for target network if not already
+            # Set the target for learning
             target_action_preds = self.target_actor(next_states)
             target_q_values = self.target_critic([next_states, target_action_preds])
             targets = rewards + self.gamma * target_q_values * (1 - dones)
