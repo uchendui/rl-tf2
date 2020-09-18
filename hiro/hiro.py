@@ -1,6 +1,7 @@
 import gym
 import numpy as np
 import tensorflow as tf
+import multiprocessing as mp
 
 from absl import flags, app
 from util import ReplayBuffer
@@ -8,6 +9,7 @@ from util.tf import polyak_average
 from tensorflow.keras import layers, Model
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
+# tf.config.experimental_run_functions_eagerly(True)
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'Pendulum-v0', 'Environment name')
@@ -126,6 +128,9 @@ class HIRO:
         self.higher_buffer = ReplayBuffer(buffer_capacity, tuple_length=5)
         self.lower_buffer = ReplayBuffer(buffer_capacity, tuple_length=4)
 
+        self.strategy = tf.distribute.MirroredStrategy()
+
+        # with self.strategy.scope():
         self.low_actor, self.low_critic = create_actor_critic(state_dim=2 * env.observation_space.shape[0],
                                                               action_dim=env.action_space.shape[0],
                                                               action_range=env.action_space.high)
@@ -183,35 +188,67 @@ class HIRO:
                          a_max=self.env.observation_space.high)
         return action
 
+    # @tf.function
+    # def log_probability(self, states, actions, candidate_goal):
+    #     goals = [candidate_goal]
+    #     for i in range(1, states.shape[0]):
+    #         if np.equal(states[i], None).any():  # Get rid of blank states
+    #             states = states[:i, :]
+    #             actions = actions[:i, :]
+    #             break
+    #         goals.append(self.goal_transition(states[i - 1], goals[i - 1], states[i]))
+    #     action_predictions = self.low_actor(np.concatenate((states, np.asarray(goals)), axis=1).astype(np.float32))
+    #     return -(1 / 2) * np.sum(np.linalg.norm(actions - action_predictions, axis=1))
+
+    @tf.function
     def log_probability(self, states, actions, candidate_goal):
         goals = [candidate_goal]
         for i in range(1, states.shape[0]):
-            if np.equal(states[i], None).any():  # Get rid of blank states
+            if tf.math.logical_and(tf.equal(tf.math.count_nonzero(states[i]), 0), tf.equal(tf.math.count_nonzero(
+                    actions[i]), 0)):  # Get rid of blank states
                 states = states[:i, :]
                 actions = actions[:i, :]
                 break
-            goals.append(self.goal_transition(states[i - 1], goals[i - 1], states[i]))
-        action_predictions = self.low_actor(np.concatenate((states, np.asarray(goals)), axis=1).astype(np.float32))
-        return -(1 / 2) * np.sum(np.linalg.norm(actions - action_predictions, axis=1))
+            goals.append(self.goal_transition(states[i - 1], goa    ls[i - 1], states[i]))
+        action_predictions = self.low_actor(tf.concat((states, tf.convert_to_tensor(goals)), axis=1))
+        return -(1 / 2) * tf.reduce_sum(tf.linalg.norm(actions - action_predictions, axis=1))
 
+    # @tf.function
     def off_policy_correct(self, states, goals, actions, new_states):
-        first_states = states.reshape(self.batch_size, -1)[:, :new_states[0].shape[0]]  # only need s_t for learning
+        # first_states = states.reshape(self.batch_size, -1)[:, :new_states[0].shape[0]]  # only need s_t for learning
+        # means = new_states - first_states
+        # std_dev = 0.5 * (1 / 2) * self.env.observation_space.high
+
+        # for i in range(states.shape[0]):
+        #     # Sample eight candidate goals sampled randomly from a Gaussian centered at s_{t+c} - s_t
+        #     # Include the original goal and a goal corresponding to the difference s_{t+c} - s_t
+        #     # TODO: clip the random actions to lie within the high-level action range
+        #     candidate_goals = np.concatenate(
+        #         (tf.random.normal(shape=(8, self.env.observation_space.shape[0]), mean=means[i], stddev=std_dev),
+        #          goals[i].reshape(1, -1), means[i].reshape(1, -1)),
+        #         axis=0)
+
+        # chosen_goal = np.argmax(
+        #     [self.log_probability(states[i], actions[i], g) for g in candidate_goals])
+        # goals[i] = candidate_goals[chosen_goal]
+
+        first_states = tf.reshape(states, (self.batch_size, -1))[:, :new_states[0].shape[0]]
         means = new_states - first_states
-        std_dev = 0.5 * (1 / 2) * self.env.observation_space.high
+        std_dev = 0.5 * (1 / 2) * tf.convert_to_tensor(self.env.observation_space.high)
 
         for i in range(states.shape[0]):
             # Sample eight candidate goals sampled randomly from a Gaussian centered at s_{t+c} - s_t
             # Include the original goal and a goal corresponding to the difference s_{t+c} - s_t
             # TODO: clip the random actions to lie within the high-level action range
-            candidate_goals = np.concatenate(
+            candidate_goals = tf.concat(
                 (tf.random.normal(shape=(8, self.env.observation_space.shape[0]), mean=means[i], stddev=std_dev),
-                 goals[i].reshape(1, -1), means[i].reshape(1, -1)),
+                 tf.reshape(goals[i], (1, -1)), tf.reshape(means[i], (1, -1))),
                 axis=0)
 
-            # TODO: multiprocessing for the log probability calculations
-            chosen_goal = np.argmax(
+            goal_1 = self.log_probability(states[0], actions[0], candidate_goals[0])
+            chosen_goal = tf.argmax(
                 [self.log_probability(states[i], actions[i], g) for g in candidate_goals])
-            goals[i] = candidate_goals[chosen_goal]
+            goals = tf.tensor_scatter_nd_update(goals, [[i]], [candidate_goals[chosen_goal]])
 
         return first_states, goals
 
@@ -285,7 +322,12 @@ class HIRO:
         if len(self.higher_buffer) >= self.batch_size:
             states, goals, actions, rewards, next_states = self.higher_buffer.sample(self.batch_size)
             rewards = rewards.reshape((-1, 1))
-            states, goals = self.off_policy_correct(states=states, goals=goals, actions=actions, new_states=next_states)
+
+            # TODO: multiprocessing for off policy correction
+            states, goals = self.off_policy_correct(states=tf.convert_to_tensor(states, dtype=tf.float32),
+                                                    goals=tf.convert_to_tensor(goals, dtype=tf.float32),
+                                                    actions=tf.convert_to_tensor(actions, dtype=tf.float32),
+                                                    new_states=tf.convert_to_tensor(next_states, dtype=tf.float32))
 
             # Set the target for learning
             target_goal_preds = self.high_target_actor(next_states)
@@ -371,8 +413,8 @@ class HIRO:
                     # Need all higher level transitions to be the same length
                     # fill the rest of this transition with zeros
                     while c < self.c:
-                        higher_obs.append(np.full(self.env.observation_space.shape, None))
-                        higher_actions.append(np.full(self.env.action_space.shape, None))
+                        higher_obs.append(np.full(self.env.observation_space.shape, 0))
+                        higher_actions.append(np.full(self.env.action_space.shape, 0))
                         c += 1
                     self.higher_buffer.add((higher_obs, higher_goal, higher_actions, higher_reward, new_obs))
 
