@@ -9,7 +9,7 @@ from util.tf import polyak_average
 from tensorflow.keras import layers, Model
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
-# tf.config.experimental_run_functions_eagerly(True)
+tf.config.experimental_run_functions_eagerly(False)
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string('env_name', 'Pendulum-v0', 'Environment name')
@@ -188,50 +188,30 @@ class HIRO:
                          a_max=self.env.observation_space.high)
         return action
 
-    # @tf.function
-    # def log_probability(self, states, actions, candidate_goal):
-    #     goals = [candidate_goal]
-    #     for i in range(1, states.shape[0]):
-    #         if np.equal(states[i], None).any():  # Get rid of blank states
-    #             states = states[:i, :]
-    #             actions = actions[:i, :]
-    #             break
-    #         goals.append(self.goal_transition(states[i - 1], goals[i - 1], states[i]))
-    #     action_predictions = self.low_actor(np.concatenate((states, np.asarray(goals)), axis=1).astype(np.float32))
-    #     return -(1 / 2) * np.sum(np.linalg.norm(actions - action_predictions, axis=1))
-
     @tf.function
     def log_probability(self, states, actions, candidate_goal):
-        goals = [candidate_goal]
-        for i in range(1, states.shape[0]):
-            if tf.math.logical_and(tf.equal(tf.math.count_nonzero(states[i]), 0), tf.equal(tf.math.count_nonzero(
-                    actions[i]), 0)):  # Get rid of blank states
-                states = states[:i, :]
-                actions = actions[:i, :]
-                break
-            goals.append(self.goal_transition(states[i - 1], goa    ls[i - 1], states[i]))
-        action_predictions = self.low_actor(tf.concat((states, tf.convert_to_tensor(goals)), axis=1))
+        goals = tf.reshape(candidate_goal, (1, -1))
+
+        # If a state-action pair is all zero, then the episode ended before an entire sequence of length c was recorded.
+        # We must remove these empty states and actions from the log probability calculation, as they could skew the
+        #   argmax computation
+        i = 1
+        while i < states.shape[0] and not (
+                tf.equal(tf.math.count_nonzero(states[i]), 0) and tf.equal(tf.math.count_nonzero(
+            actions[i]), 0)):
+            tf.autograph.experimental.set_loop_options(
+                shape_invariants=[(goals, tf.TensorShape([None, goals.shape[1]]))])
+            goals = tf.concat(
+                (goals, tf.reshape(self.goal_transition(states[i - 1], goals[i - 1], states[i]), (1, -1))), axis=0)
+            i += 1
+        states = states[:i, :]
+        actions = actions[:i, :]
+
+        action_predictions = self.low_actor(tf.concat((states, goals), axis=1))
         return -(1 / 2) * tf.reduce_sum(tf.linalg.norm(actions - action_predictions, axis=1))
 
-    # @tf.function
+    @tf.function
     def off_policy_correct(self, states, goals, actions, new_states):
-        # first_states = states.reshape(self.batch_size, -1)[:, :new_states[0].shape[0]]  # only need s_t for learning
-        # means = new_states - first_states
-        # std_dev = 0.5 * (1 / 2) * self.env.observation_space.high
-
-        # for i in range(states.shape[0]):
-        #     # Sample eight candidate goals sampled randomly from a Gaussian centered at s_{t+c} - s_t
-        #     # Include the original goal and a goal corresponding to the difference s_{t+c} - s_t
-        #     # TODO: clip the random actions to lie within the high-level action range
-        #     candidate_goals = np.concatenate(
-        #         (tf.random.normal(shape=(8, self.env.observation_space.shape[0]), mean=means[i], stddev=std_dev),
-        #          goals[i].reshape(1, -1), means[i].reshape(1, -1)),
-        #         axis=0)
-
-        # chosen_goal = np.argmax(
-        #     [self.log_probability(states[i], actions[i], g) for g in candidate_goals])
-        # goals[i] = candidate_goals[chosen_goal]
-
         first_states = tf.reshape(states, (self.batch_size, -1))[:, :new_states[0].shape[0]]
         means = new_states - first_states
         std_dev = 0.5 * (1 / 2) * tf.convert_to_tensor(self.env.observation_space.high)
@@ -245,9 +225,9 @@ class HIRO:
                  tf.reshape(goals[i], (1, -1)), tf.reshape(means[i], (1, -1))),
                 axis=0)
 
-            goal_1 = self.log_probability(states[0], actions[0], candidate_goals[0])
             chosen_goal = tf.argmax(
-                [self.log_probability(states[i], actions[i], g) for g in candidate_goals])
+                [self.log_probability(states[i], actions[i], candidate_goals[g]) for g in
+                 range(candidate_goals.shape[0])])
             goals = tf.tensor_scatter_nd_update(goals, [[i]], [candidate_goals[chosen_goal]])
 
         return first_states, goals
