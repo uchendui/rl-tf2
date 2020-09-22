@@ -303,7 +303,6 @@ class HIRO:
             states, goals, actions, rewards, next_states = self.higher_buffer.sample(self.batch_size)
             rewards = rewards.reshape((-1, 1))
 
-            # TODO: multiprocessing for off policy correction
             states, goals = self.off_policy_correct(states=tf.convert_to_tensor(states, dtype=tf.float32),
                                                     goals=tf.convert_to_tensor(goals, dtype=tf.float32),
                                                     actions=tf.convert_to_tensor(actions, dtype=tf.float32),
