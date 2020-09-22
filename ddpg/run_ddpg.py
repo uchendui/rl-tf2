@@ -18,7 +18,7 @@ def main(argv):
         episode_reward = 0
         while not done:
             env.render()
-            action = agent.act(obs, noise=False)
+            action = agent.act(obs, noise=False).flatten()
             obs, rew, done, info = env.step(action)
             obs = obs.flatten()
             episode_reward += rew

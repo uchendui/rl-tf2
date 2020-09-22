@@ -1,4 +1,5 @@
 import gym
+import time
 
 from hiro import HIRO  # Note that flags from hiro.py are imported
 from absl import flags, app
@@ -23,6 +24,7 @@ def main(argv):
             obs, rew, done, info = env.step(action)
             obs = obs.flatten()
             episode_reward += rew
+            time.sleep(0.01)
         print(f'Episode Reward:{episode_reward}')
     env.close()
 

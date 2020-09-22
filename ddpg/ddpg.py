@@ -216,14 +216,16 @@ class DDPG:
     def learn(self):
         mean_reward = None
         total_steps = 0
+        overall_steps = 0
         for ep in range(self.max_episodes):
             if ep % self.print_freq == 0 and ep > 0:
                 new_mean_reward = np.mean(self.rewards[-self.print_freq - 1:])
 
                 print(f"-------------------------------------------------------")
                 print(f"Mean {self.print_freq} Episode Reward: {new_mean_reward}")
+                print(f"Mean Steps: {total_steps / self.print_freq}")
                 print(f"Total Episodes: {ep}")
-                print(f"Total Steps: {total_steps}")
+                print(f"Total Steps: {overall_steps}")
                 print(f"-------------------------------------------------------")
 
                 total_steps = 0
@@ -274,6 +276,7 @@ class DDPG:
 
             self.rewards.append(episode_reward)
             total_steps += ep_len
+            overall_steps += ep_len
 
 
 def main(argv):
