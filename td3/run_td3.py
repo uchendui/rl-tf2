@@ -1,6 +1,6 @@
 import gym
 
-from ddpg import DDPG  # Note that flags from ddpg.py are imported
+from td3 import TD3  # Note that flags from td3.py are imported
 from absl import flags, app
 
 FLAGS = flags.FLAGS
@@ -10,7 +10,7 @@ flags.DEFINE_integer('num_episodes', 10, 'Number of episodes to run the trained 
 def main(argv):
     env_name = FLAGS.env_name
     env = gym.make(env_name)
-    agent = DDPG(env, load_path=FLAGS.load_path, training=False)
+    agent = TD3(env, load_path=FLAGS.load_path, training=False)
 
     for episodes in range(FLAGS.num_episodes):
         done = False
