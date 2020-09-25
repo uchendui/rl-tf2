@@ -1,1 +1,1 @@
-from .td3 import TD3
+from .model import create_actor_critic

@@ -1,12 +1,13 @@
+# TODO: make a whole bunch of functions that are deocration with tf.function for training the actor and critic models
+#   right now we have a problem where the tf.function can only act on one model and optimizer 😢😭
 import gym
 import numpy as np
 import tensorflow as tf
-import multiprocessing as mp
 
 from absl import flags, app
 from util import ReplayBuffer
 from util.tf import polyak_average
-from tensorflow.keras import layers, Model
+from td3.model import create_actor_critic
 
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 tf.config.experimental_run_functions_eagerly(False)
@@ -30,61 +31,9 @@ flags.DEFINE_integer('max_episodes', 100, 'Maximum number of training episodes')
 flags.DEFINE_integer('max_episode_len', None, 'Maximum length of each episode')
 flags.DEFINE_integer('print_freq', 1, 'Episodes between displaying log info')
 flags.DEFINE_integer('c', 10, 'Number of environment steps between high level policy updates')
+flags.DEFINE_integer('d', 2, 'The actor and target networks will be updated every d steps')
 flags.DEFINE_boolean('render', False, 'Render the environment during training')
 flags.DEFINE_integer('seed', 1234, 'Random seed for reproducible results')
-
-
-class Actor(Model):
-    def __init__(self, action_dim, action_range, **kwargs):
-        super(Actor, self).__init__(kwargs)
-        # Model architecture from https://keras.io/examples/rl/ddpg_pendulum/
-        self.a1 = layers.Dense(512, activation='relu', name='actor_1')
-        self.a2 = layers.Dense(512, activation='relu', name='actor_2')
-        self.action_prediction = layers.Dense(action_dim,
-                                              activation='tanh',
-                                              name='actor_action_pred')
-        self.batch_norm_1 = layers.BatchNormalization()
-        self.batch_norm_2 = layers.BatchNormalization()
-        self.action_range = action_range
-
-    def call(self, states, **kwargs):
-        out = self.a1(states)
-        out = self.batch_norm_1(out)
-        out = self.a2(out)
-        out = self.batch_norm_2(out)
-        return self.action_range * self.action_prediction(out)
-
-
-class Critic(Model):
-    def __init__(self, **kwargs):
-        super(Critic, self).__init__(kwargs)
-        self.q1 = layers.Dense(512, activation='relu', name='critic_1')
-        self.q2 = layers.Dense(512, activation='relu', name='critic_2')
-        self.q_pred = layers.Dense(1, name='critic_q_pred')
-        self.concat = layers.Concatenate()
-        self.batch_norm_1 = layers.BatchNormalization()
-        self.batch_norm_2 = layers.BatchNormalization()
-
-    def call(self, inputs, **kwargs):
-        out = self.concat(inputs)
-        out = self.q1(out)
-        out = self.batch_norm_1(out)
-        out = self.q2(out)
-        out = self.batch_norm_2(out)
-        q_pred = self.q_pred(out)
-        return q_pred
-
-
-def create_actor_critic(state_dim, action_dim, action_range):
-    state_in = layers.Input(shape=(state_dim,), )
-    action_in = layers.Input(shape=(action_dim,), )
-
-    actor_output = Actor(action_dim=action_dim, action_range=action_range)(state_in)
-    critic_output = Critic()([state_in, action_in])
-
-    actor = Model(inputs=state_in, outputs=actor_output)
-    critic = Model(inputs=[state_in, action_in], outputs=critic_output)
-    return actor, critic
 
 
 class HIRO:
@@ -93,6 +42,7 @@ class HIRO:
                  gamma=0.99,
                  polyak=0.995,
                  c=10,
+                 d=2,
                  high_act_noise=0.1,
                  low_act_noise=0.1,
                  high_rew_scale=0.1,
@@ -125,44 +75,64 @@ class HIRO:
         self.print_freq = print_freq
         self.save_path = save_path
         self.c = c
+        self.d = d
         self.higher_buffer = ReplayBuffer(buffer_capacity, tuple_length=5)
         self.lower_buffer = ReplayBuffer(buffer_capacity, tuple_length=4)
 
-        self.strategy = tf.distribute.MirroredStrategy()
-
-        # with self.strategy.scope():
-        self.low_actor, self.low_critic = create_actor_critic(state_dim=2 * env.observation_space.shape[0],
-                                                              action_dim=env.action_space.shape[0],
-                                                              action_range=env.action_space.high)
-        self.low_target_actor, self.low_target_critic = create_actor_critic(
+        self.low_actor, self.low_critic_1, self.low_critic_2 = create_actor_critic(
             state_dim=2 * env.observation_space.shape[0],
             action_dim=env.action_space.shape[0],
             action_range=env.action_space.high)
 
-        self.high_actor, self.high_critic = create_actor_critic(state_dim=env.observation_space.shape[0],
-                                                                action_dim=env.observation_space.shape[0],
-                                                                action_range=env.observation_space.high
-                                                                )
-        self.high_target_actor, self.high_target_critic = create_actor_critic(state_dim=env.observation_space.shape[0],
-                                                                              action_dim=env.observation_space.shape[0],
-                                                                              action_range=env.observation_space.high)
+        self.low_target_actor, self.low_target_critic_1, self.low_target_critic_2 = create_actor_critic(
+            state_dim=2 * env.observation_space.shape[0],
+            action_dim=env.action_space.shape[0],
+            action_range=env.action_space.high)
+
+        self.high_actor, self.high_critic_1, self.high_critic_2 = create_actor_critic(
+            state_dim=env.observation_space.shape[0],
+            action_dim=env.observation_space.shape[0],
+            action_range=env.observation_space.high)
+
+        self.high_target_actor, self.high_target_critic_1, self.high_target_critic_2 = create_actor_critic(
+            state_dim=env.observation_space.shape[0],
+            action_dim=env.observation_space.shape[0],
+            action_range=env.observation_space.high)
         self.low_target_actor.set_weights(self.low_actor.get_weights())
-        self.low_target_critic.set_weights(self.low_critic.get_weights())
+        self.low_target_critic_1.set_weights(self.low_critic_1.get_weights())
+        self.low_target_critic_2.set_weights(self.low_critic_2.get_weights())
         self.high_target_actor.set_weights(self.high_actor.get_weights())
-        self.high_target_critic.set_weights(self.high_critic.get_weights())
+        self.high_target_critic_1.set_weights(self.high_critic_1.get_weights())
+        self.high_target_critic_2.set_weights(self.high_critic_2.get_weights())
 
         if training:
             self.low_actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.p_lr)
-            self.low_critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
+            self.low_critic_1_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
+            self.low_critic_2_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
             self.high_actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.p_lr)
-            self.high_critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
+            self.high_critic_1_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
+            self.high_critic_2_optimizer = tf.keras.optimizers.Adam(learning_rate=self.q_lr)
             self.mse = tf.keras.losses.MeanSquaredError()
             self.summary_writer = tf.summary.create_file_writer(log_dir)
+
+            self.low_actor_train_fn = self.create_train_step_actor_fn(self.low_actor, self.low_critic_1,
+                                                                      self.low_actor_optimizer)
+            self.low_critic_train_fns = [self.create_train_step_critic_fn(critic=c, optimizer=o) for c, o in
+                                         [(self.low_critic_1, self.low_critic_1_optimizer),
+                                          (self.low_critic_2, self.low_critic_2_optimizer)]]
+
+            self.high_actor_train_fn = self.create_train_step_actor_fn(self.high_actor, self.high_critic_1,
+                                                                       self.high_actor_optimizer)
+            self.high_critic_train_fns = [self.create_train_step_critic_fn(critic=c, optimizer=o) for c, o in
+                                          [(self.high_critic_1, self.high_critic_1_optimizer),
+                                           (self.high_critic_2, self.high_critic_2_optimizer)]]
         if load_path is not None:
             self.low_actor.load_weights(f'{load_path}/low/actor')
-            self.low_critic.load_weights(f'{load_path}/low/critic')
+            self.low_critic_1.load_weights(f'{load_path}/low/critic_1')
+            self.low_critic_2.load_weights(f'{load_path}/low/critic_2')
             self.high_actor.load_weights(f'{load_path}/high/actor')
-            self.high_critic.load_weights(f'{load_path}/high/critic')
+            self.high_critic_1.load_weights(f'{load_path}/high/critic_1')
+            self.high_critic_2.load_weights(f'{load_path}/high/critic_2')
 
     @staticmethod
     def goal_transition(state, goal, next_state):
@@ -192,18 +162,25 @@ class HIRO:
     def log_probability(self, states, actions, candidate_goal):
         goals = tf.reshape(candidate_goal, (1, -1))
 
+        def body(curr_i, curr_goals, s):
+            new_goals = tf.concat(
+                (curr_goals,
+                 tf.reshape(self.goal_transition(s[curr_i - 1], curr_goals[curr_i - 1], s[curr_i]), (1, -1))), axis=0)
+            curr_i += 1
+            return [curr_i, new_goals, s]
+
+        def condition(curr_i, curr_goals, s):
+            return curr_i < s.shape[0] and not (
+                    tf.equal(tf.math.count_nonzero(s[curr_i]), 0) and tf.equal(tf.math.count_nonzero(actions[curr_i]),
+                                                                               0))
+
         # If a state-action pair is all zero, then the episode ended before an entire sequence of length c was recorded.
         # We must remove these empty states and actions from the log probability calculation, as they could skew the
         #   argmax computation
-        i = 1
-        while i < states.shape[0] and not (
-                tf.equal(tf.math.count_nonzero(states[i]), 0) and tf.equal(tf.math.count_nonzero(
-            actions[i]), 0)):
-            tf.autograph.experimental.set_loop_options(
-                shape_invariants=[(goals, tf.TensorShape([None, goals.shape[1]]))])
-            goals = tf.concat(
-                (goals, tf.reshape(self.goal_transition(states[i - 1], goals[i - 1], states[i]), (1, -1))), axis=0)
-            i += 1
+        i = tf.constant(1)
+        i, goals, states = tf.while_loop(condition, body, [i, goals, states],
+                                         shape_invariants=[tf.TensorShape(None), tf.TensorShape([None, goals.shape[1]]),
+                                                           states.shape])
         states = states[:i, :]
         actions = actions[:i, :]
 
@@ -233,92 +210,101 @@ class HIRO:
         return first_states, goals
 
     @tf.function
-    def train_step_high(self, states, actions, targets):
-        # Update actor
-        with tf.GradientTape() as tape:
-            goal_predictions = self.high_actor(states)
-            q_values = self.high_critic([states, goal_predictions])
-            policy_loss = -tf.reduce_mean(q_values)
-        gradients = tape.gradient(policy_loss, self.high_actor.trainable_variables)
-        self.high_actor_optimizer.apply_gradients(zip(gradients, self.high_actor.trainable_variables))
+    def train_step_critics(self, states, actions, rewards, next_states, actor, target_critic_1,
+                           target_critic_2, critic_trains_fns, target_noise,
+                           scope='Policy'):
+        target_goal_preds = actor(next_states)
+        target_goal_preds += target_noise
 
-        # Update critic
-        with tf.GradientTape() as tape:
-            q_values = self.high_critic([states, actions])
-            mse_loss = self.mse(q_values, targets)
-        gradients = tape.gradient(mse_loss, self.high_critic.trainable_variables)
-        self.high_critic_optimizer.apply_gradients(zip(gradients, self.high_critic.trainable_variables))
+        target_q_values_1 = target_critic_1([next_states, target_goal_preds])
+        target_q_values_2 = target_critic_2([next_states, target_goal_preds])
 
-        with tf.name_scope("Higher_Policy"):
-            with self.summary_writer.as_default():
-                tf.summary.scalar('MSE Loss', mse_loss, step=self.high_critic_optimizer.iterations)
-                tf.summary.scalar('Policy Loss', policy_loss, step=self.high_critic_optimizer.iterations)
-                tf.summary.scalar('Estimated Q Value', tf.reduce_mean(q_values),
-                                  step=self.high_critic_optimizer.iterations)
+        target_q_values = tf.concat((target_q_values_1, target_q_values_2), axis=1)
+        target_q_values = tf.reshape(tf.reduce_min(target_q_values, axis=1), (self.batch_size, -1))
+        targets = rewards + self.gamma * target_q_values
 
-    @tf.function
-    def train_step_low(self, states, actions, targets):
-        # Update actor
-        with tf.GradientTape() as tape:
-            action_predictions = self.low_actor(states)
-            q_values = self.low_critic([states, action_predictions])
-            policy_loss = -tf.reduce_mean(q_values)
-        actor_gradients = tape.gradient(policy_loss, self.low_actor.trainable_variables)
-        self.low_actor_optimizer.apply_gradients(zip(actor_gradients, self.low_actor.trainable_variables))
+        critic_trains_fns[0](states, actions, targets, scope=scope, label='Critic 1')
+        critic_trains_fns[1](states, actions, targets, scope=scope, label='Critic 2')
 
-        # Update Critic
-        with tf.GradientTape() as tape:
-            q_values = self.low_critic([states, actions])
-            mse_loss = self.mse(q_values, targets)
-        gradients = tape.gradient(mse_loss, self.low_critic.trainable_variables)
-        self.low_critic_optimizer.apply_gradients(zip(gradients, self.low_critic.trainable_variables))
+    def create_train_step_actor_fn(self, actor, critic, optimizer):
+        @tf.function
+        def train_step_actor(states, scope='policy', label='actor'):
+            with tf.GradientTape() as tape:
+                action_predictions = actor(states)
+                q_values = critic([states, action_predictions])
+                policy_loss = -tf.reduce_mean(q_values)
+            gradients = tape.gradient(policy_loss, actor.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, actor.trainable_variables))
 
-        with tf.name_scope("Lower_Policy"):
-            with self.summary_writer.as_default():
-                tf.summary.scalar('MSE Loss', mse_loss, step=self.low_critic_optimizer.iterations)
-                tf.summary.scalar('Policy Loss', policy_loss, step=self.low_critic_optimizer.iterations)
-                tf.summary.scalar('Estimated Q Value', tf.reduce_mean(q_values),
-                                  step=self.low_critic_optimizer.iterations)
+            with tf.name_scope(scope):
+                with self.summary_writer.as_default():
+                    tf.summary.scalar(f'{label} Policy Loss', policy_loss, step=optimizer.iterations)
+
+        return train_step_actor
+
+    def create_train_step_critic_fn(self, critic, optimizer):
+        @tf.function
+        def train_step_critic(states, actions, targets, scope='Policy', label='Critic'):
+            with tf.GradientTape() as tape:
+                q_values = critic([states, actions])
+                mse_loss = self.mse(q_values, targets)
+            gradients = tape.gradient(mse_loss, critic.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, critic.trainable_variables))
+
+            with tf.name_scope(scope):
+                with self.summary_writer.as_default():
+                    tf.summary.scalar(f'{label} MSE Loss', mse_loss, step=optimizer.iterations)
+                    tf.summary.scalar(f'{label} Mean Q Values', tf.reduce_mean(q_values), step=optimizer.iterations)
+
+        return train_step_critic
 
     def update_lower(self):
         if len(self.lower_buffer) >= self.batch_size:
-            # Sample random minibatch of N transitions
             states, actions, rewards, next_states = self.lower_buffer.sample(self.batch_size)
-            rewards = rewards.reshape(-1, 1)
+            rewards = rewards.reshape(-1, 1).astype(np.float32)
 
-            # Set the target for learning
-            target_action_preds = self.low_target_actor(next_states)
-            target_q_values = self.low_target_critic([next_states, target_action_preds])
-            targets = rewards + self.gamma * target_q_values
+            self.train_step_critics(states, actions, rewards, next_states, self.low_actor, self.low_target_critic_1,
+                                    self.low_target_critic_2,
+                                    self.low_critic_train_fns,
+                                    target_noise=tf.random.normal(actions.shape,
+                                                                  stddev=0.1 * self.env.action_space.high),
+                                    scope='Lower_Policy')
 
-            # Update actor and critic networks
-            self.train_step_low(states, actions, targets)
+            if self.low_critic_1_optimizer.iterations % self.d == 0:
+                self.low_actor_train_fn(states, scope='Lower_Policy', label='Actor')
 
-            # Update target networks
-            polyak_average(self.low_actor.variables, self.low_target_actor.variables, self.polyak)
-            polyak_average(self.low_critic.variables, self.low_target_critic.variables, self.polyak)
+                # Update target networks
+                polyak_average(self.low_actor.variables, self.low_target_actor.variables, self.polyak)
+                polyak_average(self.low_critic_1.variables, self.low_target_critic_1.variables, self.polyak)
+                polyak_average(self.low_critic_2.variables, self.low_target_critic_2.variables, self.polyak)
 
     def update_higher(self):
         if len(self.higher_buffer) >= self.batch_size:
             states, goals, actions, rewards, next_states = self.higher_buffer.sample(self.batch_size)
             rewards = rewards.reshape((-1, 1))
 
-            states, goals = self.off_policy_correct(states=tf.convert_to_tensor(states, dtype=tf.float32),
-                                                    goals=tf.convert_to_tensor(goals, dtype=tf.float32),
-                                                    actions=tf.convert_to_tensor(actions, dtype=tf.float32),
-                                                    new_states=tf.convert_to_tensor(next_states, dtype=tf.float32))
+            states, goals, actions, rewards, next_states = (tf.convert_to_tensor(states, dtype=tf.float32),
+                                                            tf.convert_to_tensor(goals, dtype=tf.float32),
+                                                            tf.convert_to_tensor(actions, dtype=tf.float32),
+                                                            tf.convert_to_tensor(rewards, dtype=tf.float32),
+                                                            tf.convert_to_tensor(next_states, dtype=tf.float32))
 
-            # Set the target for learning
-            target_goal_preds = self.high_target_actor(next_states)
-            target_q_values = self.high_target_critic([next_states, target_goal_preds])
-            targets = rewards + self.gamma * target_q_values
+            states, goals = self.off_policy_correct(states=states, goals=goals, actions=actions, new_states=next_states)
 
-            # Update actor and critic networks. (goals are actions for the higher policy)
-            self.train_step_high(states, goals, targets)
+            self.train_step_critics(states, goals, rewards, next_states, self.high_actor, self.high_target_critic_1,
+                                    self.high_target_critic_2,
+                                    self.high_critic_train_fns,
+                                    target_noise=tf.random.normal(next_states.shape,
+                                                                  stddev=0.1 * self.env.observation_space.high),
+                                    scope='Higher_Policy')
 
-            # Update target networks
-            polyak_average(self.high_actor.variables, self.high_target_actor.variables, self.polyak)
-            polyak_average(self.high_critic.variables, self.high_target_critic.variables, self.polyak)
+            if self.high_critic_1_optimizer.iterations % self.d == 0:
+                self.high_actor_train_fn(states, scope='Higher_Policy', label='Actor')
+
+                # Update target networks
+                polyak_average(self.high_actor.variables, self.high_target_actor.variables, self.polyak)
+                polyak_average(self.high_critic_1.variables, self.high_target_critic_1.variables, self.polyak)
+                polyak_average(self.high_critic_2.variables, self.high_target_critic_2.variables, self.polyak)
 
     def learn(self):
         # Collect experiences s_t, g_t, a_t, R_t
@@ -336,8 +322,9 @@ class HIRO:
                 print(f"-------------------------------------------------------")
 
                 total_steps = 0
-                with self.summary_writer.as_default():
-                    tf.summary.scalar(f'Mean {self.print_freq} Episode Reward', new_mean_reward, step=ep)
+                with tf.name_scope('Episodic Information'):
+                    with self.summary_writer.as_default():
+                        tf.summary.scalar(f'Mean {self.print_freq} Episode Reward', new_mean_reward, step=ep)
 
                 # Model saving inspired by Open AI Baseline implementation
                 if (mean_reward is None or new_mean_reward >= mean_reward) and self.save_path is not None:
@@ -346,9 +333,11 @@ class HIRO:
                     mean_reward = new_mean_reward
 
                     self.low_actor.save_weights(f'{self.save_path}/low/actor')
-                    self.low_critic.save_weights(f'{self.save_path}/low/critic')
+                    self.low_critic_1.save_weights(f'{self.save_path}/low/critic_1')
+                    self.low_critic_2.save_weights(f'{self.save_path}/low/critic_2')
                     self.high_actor.save_weights(f'{self.save_path}/high/actor')
-                    self.high_critic.save_weights(f'{self.save_path}/high/critic')
+                    self.high_critic_1.save_weights(f'{self.save_path}/high/critic_1')
+                    self.high_critic_2.save_weights(f'{self.save_path}/high/critic_2')
 
             obs = self.env.reset()
             goal = self.get_goal(obs.reshape((1, -1)), noise=True).flatten()
@@ -436,7 +425,8 @@ def main(argv):
                 log_dir=FLAGS.log_path,
                 max_episodes=FLAGS.max_episodes,
                 print_freq=FLAGS.print_freq,
-                c=FLAGS.c
+                c=FLAGS.c,
+                d=FLAGS.d
                 )
     hiro.learn()
 
