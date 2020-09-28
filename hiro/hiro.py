@@ -1,5 +1,3 @@
-# TODO: make a whole bunch of functions that are deocration with tf.function for training the actor and critic models
-#   right now we have a problem where the tf.function can only act on one model and optimizer 😢😭
 import gym
 import numpy as np
 import tensorflow as tf
@@ -324,7 +322,8 @@ class HIRO:
                 total_steps = 0
                 with tf.name_scope('Episodic Information'):
                     with self.summary_writer.as_default():
-                        tf.summary.scalar(f'Mean {self.print_freq} Episode Reward', new_mean_reward, step=ep)
+                        tf.summary.scalar(f'Mean {self.print_freq} Episode Reward', new_mean_reward,
+                                          step=ep // self.print_freq)
 
                 # Model saving inspired by Open AI Baseline implementation
                 if (mean_reward is None or new_mean_reward >= mean_reward) and self.save_path is not None:
