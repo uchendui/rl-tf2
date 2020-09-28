@@ -6,4 +6,5 @@ Implementations of various reinforcement learning algorithms in TensorFlow 2
 
 * DQN
 * DDPG
+* TD3
 * HIRO
