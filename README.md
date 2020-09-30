@@ -8,3 +8,4 @@ Implementations of various reinforcement learning algorithms in TensorFlow 2
 * DDPG
 * TD3
 * HIRO
+* VPG
